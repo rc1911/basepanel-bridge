@@ -39,8 +39,9 @@ $config = [
     'database_path'   => __DIR__ . '/database.sqlite',
 
     /**
-     * If true, only SELECT / WITH / EXPLAIN / PRAGMA / VALUES / ANALYZE
-     * statements are accepted. Useful if you only want Basepanel to read.
+     * If true, the database is opened read-only and only SELECT / WITH /
+     * EXPLAIN / PRAGMA / VALUES statements are accepted. Useful if you
+     * only want Basepanel to read.
      */
     'read_only'       => false,
 
@@ -49,6 +50,15 @@ $config = [
      * testing locally over loopback.
      */
     'require_https'   => true,
+
+    /**
+     * Peer addresses (REMOTE_ADDR) allowed to set X-Forwarded-* headers,
+     * e.g. a load balancer or CDN in front of your web server. Forwarded
+     * headers from any other peer are ignored, so they can't be spoofed
+     * to bypass `require_https` or `allowed_ips`. If PHP runs directly
+     * behind Apache/nginx on the same box you don't need to change this.
+     */
+    'trusted_proxies' => ['127.0.0.1', '::1'],
 
     /**
      * Optional IP allowlist (exact match against the client's address).
@@ -117,11 +127,11 @@ function handle_request(array $config): void
         send_error(500, 'PDO_SQLITE_MISSING', 'PHP extension pdo_sqlite is not enabled.');
     }
 
-    if ($config['require_https'] && !is_https()) {
+    if ($config['require_https'] && !is_https($config['trusted_proxies'])) {
         send_error(400, 'HTTPS_REQUIRED', 'This bridge must be served over HTTPS.');
     }
 
-    if (!empty($config['allowed_ips']) && !in_array(client_ip(), $config['allowed_ips'], true)) {
+    if (!empty($config['allowed_ips']) && !in_array(client_ip($config['trusted_proxies']), $config['allowed_ips'], true)) {
         send_error(403, 'IP_FORBIDDEN', 'Client IP is not in the allowlist.');
     }
 
@@ -186,7 +196,13 @@ function apply_cors(array $origins): void
     header('Access-Control-Max-Age: 86400');
 }
 
-function is_https(): bool
+function is_from_trusted_proxy(array $trustedProxies): bool
+{
+    $peer = (string) ($_SERVER['REMOTE_ADDR'] ?? '');
+    return $peer !== '' && in_array($peer, $trustedProxies, true);
+}
+
+function is_https(array $trustedProxies): bool
 {
     if (!empty($_SERVER['HTTPS']) && strtolower((string) $_SERVER['HTTPS']) !== 'off') {
         return true;
@@ -194,17 +210,26 @@ function is_https(): bool
     if ((int) ($_SERVER['SERVER_PORT'] ?? 0) === 443) {
         return true;
     }
-    if (strtolower((string) ($_SERVER['HTTP_X_FORWARDED_PROTO'] ?? '')) === 'https') {
-        return true;
+    if (is_from_trusted_proxy($trustedProxies)) {
+        // Take the last (right-most) entry: it's the one set by our own proxy.
+        $parts = explode(',', (string) ($_SERVER['HTTP_X_FORWARDED_PROTO'] ?? ''));
+        if (strtolower(trim((string) end($parts))) === 'https') {
+            return true;
+        }
     }
     return false;
 }
 
-function client_ip(): string
+function client_ip(array $trustedProxies): string
 {
-    $forwarded = (string) ($_SERVER['HTTP_X_FORWARDED_FOR'] ?? '');
-    if ($forwarded !== '') {
-        return trim(explode(',', $forwarded)[0]);
+    if (is_from_trusted_proxy($trustedProxies)) {
+        // Right-most X-Forwarded-For entry is appended by our trusted proxy;
+        // anything left of it is client-supplied and spoofable.
+        $parts = array_values(array_filter(array_map('trim',
+            explode(',', (string) ($_SERVER['HTTP_X_FORWARDED_FOR'] ?? '')))));
+        if (count($parts) > 0) {
+            return $parts[count($parts) - 1];
+        }
     }
     return (string) ($_SERVER['REMOTE_ADDR'] ?? '');
 }
@@ -231,7 +256,9 @@ function is_token_valid(string $expected): bool
     if ($expected === '' || $expected === PLACEHOLDER_TOKEN) {
         return false;
     }
-    return hash_equals($expected, $m[1]);
+    // Hash both sides so the comparison is constant-length as well as
+    // constant-time (hash_equals alone leaks the token's length).
+    return hash_equals(hash('sha256', $expected), hash('sha256', $m[1]));
 }
 
 function read_body(int $maxBytes): string
@@ -446,7 +473,7 @@ function is_safe_read(string $sql): bool
     $stripped = preg_replace('#/\*.*?\*/#s', ' ', $sql) ?? $sql;
     $stripped = preg_replace('/--[^\n]*/', ' ', $stripped) ?? $stripped;
     $stripped = ltrim($stripped);
-    return (bool) preg_match('/^(SELECT|WITH|EXPLAIN|PRAGMA|VALUES|ANALYZE)\b/i', $stripped);
+    return (bool) preg_match('/^(SELECT|WITH|EXPLAIN|PRAGMA|VALUES)\b/i', $stripped);
 }
 
 // --- Responses ---------------------------------------------------------------

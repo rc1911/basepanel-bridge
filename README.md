@@ -36,6 +36,12 @@ care which one you choose.
    # 9b1f...d3c8
   ```
    Open `basepanel.php` and replace the two values at the top:
+
+```php
+'bearer_token'  => '9b1f...d3c8',                    // ← the token you just generated
+'database_path' => '/var/www/myapp/data/app.sqlite', // ← absolute path to your database
+```
+
 3. **Upload it next to your database**, somewhere your web server can serve.
   ```
    /var/www/myapp/
@@ -49,6 +55,21 @@ care which one you choose.
    GET https://your-site.com/basepanel.php
   ```
    You should see something like:
+
+```json
+{
+  "ok": true,
+  "bridge": "basepanel-bridge-php",
+  "version": "1.0.0",
+  "protocol": 1,
+  "authConfigured": true,
+  "readOnly": false,
+  "database": { "name": "app.sqlite", "exists": true, "size": 24576, "sqliteVersion": "3.43.2" }
+}
+```
+
+   If `authConfigured` is `false`, the token at the top of the file is still
+   the placeholder.
 5. **Add it to Basepanel.** Open the app, choose **Self-Hosted VPS**, and paste:
   - URL: `https://your-site.com/basepanel.php`
   - Token: the one you generated above
@@ -66,11 +87,15 @@ export BASEPANEL_BEARER_TOKEN=$(node -e "console.log(require('crypto').randomByt
 export BASEPANEL_DATABASE_PATH=/var/lib/myapp/app.sqlite
 
 node basepanel.js
-# [basepanel] basepanel-bridge-node v1.0.0 listening on http://0.0.0.0:8080
+# [basepanel] basepanel-bridge-node v1.0.0 listening on http://127.0.0.1:8080
 ```
 
 Then put nginx, Caddy, or Cloudflare in front to terminate TLS and forward to
-`http://127.0.0.1:8080`. A typical Caddy config:
+`http://127.0.0.1:8080`. The bridge binds to loopback by default so it's only
+reachable through your proxy; set `BASEPANEL_HOST=0.0.0.0` if you need to
+expose it directly (e.g. inside a container). If your proxy is **not** on the
+same machine, also set `BASEPANEL_TRUSTED_PROXIES` to the proxy's IP so its
+`X-Forwarded-*` headers are honored. A typical Caddy config:
 
 ```caddy
 bridge.example.com {
@@ -131,16 +156,20 @@ since PHP-FPM environments rarely propagate env vars cleanly.
 | ----------------- | ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `bearer_token`    | *placeholder*       | **Required.** A long random secret. Treat it like a database password.                                                                                                                   |
 | `database_path`   | `./database.sqlite` | Absolute path to the `.sqlite` file you want to expose.                                                                                                                                  |
-| `read_only`       | `false`             | If `true`, only `SELECT`, `WITH`, `EXPLAIN`, `PRAGMA`, `VALUES`, and `ANALYZE` statements are accepted.                                                                                  |
-| `require_https`   | `true`              | Reject plain-HTTP requests. Honors `X-Forwarded-Proto` from a trusted proxy. Disable only for local testing.                                                                             |
-| `allowed_ips`     | `[]`                | Optional IP allowlist (exact match). Empty = allow any IP that knows the token.                                                                                                          |
+| `read_only`       | `false`             | If `true`, the database is opened read-only and only `SELECT`, `WITH`, `EXPLAIN`, `PRAGMA`, and `VALUES` statements are accepted. Enforcement comes from the read-only connection itself, not just the keyword check. |
+| `require_https`   | `true`              | Reject plain-HTTP requests. Honors `X-Forwarded-Proto`, but only when the request comes from one of `trusted_proxies`. Disable only for local testing.                                   |
+| `trust_proxy`     | `true`              | Master switch for honoring `X-Forwarded-*` headers (Node/Python). Headers are still only trusted when the peer is in `trusted_proxies`.                                                  |
+| `trusted_proxies` | *loopback*          | Peer addresses allowed to set `X-Forwarded-*` headers. Defaults to `127.0.0.1` / `::1`. Add your load balancer / CDN egress IPs if the proxy isn't on the same machine — otherwise their forwarded headers are ignored. |
+| `allowed_ips`     | `[]`                | Optional IP allowlist (exact match). Empty = allow any IP that knows the token. Checked against the client IP as resolved via `trusted_proxies`, so forged `X-Forwarded-For` headers can't bypass it. |
 | `allowed_origins` | `["*"]`             | CORS origins. The Basepanel apps (iOS, iPadOS, Android, Mac Catalyst) all use native networking and don't care about CORS, this only matters if you also call the bridge from a browser. |
 | `max_body_bytes`  | `4194304`           | Maximum POST body size (4 MB).                                                                                                                                                           |
 | `busy_timeout_ms` | `5000`              | SQLite busy timeout, how long to wait for a lock to clear.                                                                                                                               |
+| `host` / `port`   | `127.0.0.1` / `8080`| (Node/Python only.) Bind address and port. Loopback by default so only your reverse proxy can reach the bridge; set `host` to `0.0.0.0` to expose it directly.                          |
 
 
 For Node and Python, override at runtime with env vars: `BASEPANEL_BEARER_TOKEN`,
 `BASEPANEL_DATABASE_PATH`, `BASEPANEL_READ_ONLY`, `BASEPANEL_REQUIRE_HTTPS`,
+`BASEPANEL_TRUST_PROXY`, `BASEPANEL_TRUSTED_PROXIES` (comma-separated),
 `BASEPANEL_ALLOWED_IPS` (comma-separated), `BASEPANEL_ALLOWED_ORIGINS`
 (comma-separated), `BASEPANEL_MAX_BODY_BYTES`, `BASEPANEL_BUSY_TIMEOUT_MS`,
 `BASEPANEL_HOST`, `BASEPANEL_PORT`.
@@ -161,7 +190,9 @@ run. To keep that safe:
 4. **Consider read-only mode** if Basepanel only needs to inspect data. Flip
   `read_only` to `true` and you'll reject anything that isn't a read.
 5. **Optionally restrict by IP** with `allowed_ips`. Good for fixed-IP devices
-  or when paired with a mesh VPN like Tailscale.
+  or when paired with a mesh VPN like Tailscale. The client IP is taken from
+   `X-Forwarded-For` only when the request comes from a peer listed in
+   `trusted_proxies`, so make sure that list matches your proxy setup.
 6. **Make sure the SQLite file isn't world-readable** from elsewhere on your
   web root. The bridge uses the path you point it at, but you don't want
    `/data/app.sqlite` to also be downloadable directly.
@@ -230,6 +261,9 @@ Send `Authorization: Bearer <token>` and a JSON body. There are two shapes:
 
 `params` may be a positional array (`[1, "x"]`) or a named object
 (`{"id": 1, "name": "x"}` — bound as `:id`, `:name`).
+
+Each `sql` string must contain a **single statement** — anything after the
+first statement is not executed. Use the `statements` array to run batches.
 
 ### Successful response
 

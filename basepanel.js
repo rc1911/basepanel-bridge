@@ -44,11 +44,20 @@ const config = {
   read_only: parseBool(process.env.BASEPANEL_READ_ONLY, false),
 
   /**
-   * Refuse plain-HTTP requests. Honors the `X-Forwarded-Proto` header sent
-   * by your reverse proxy. Set BASEPANEL_TRUST_PROXY=1 for proxied setups.
+   * Refuse plain-HTTP requests. Honors the `X-Forwarded-Proto` header, but
+   * only when the request arrives from one of `trusted_proxies`.
    */
   require_https: parseBool(process.env.BASEPANEL_REQUIRE_HTTPS, true),
   trust_proxy: parseBool(process.env.BASEPANEL_TRUST_PROXY, true),
+
+  /**
+   * Peer addresses allowed to set `X-Forwarded-*` headers (your reverse
+   * proxy). Forwarded headers from any other peer are ignored, so they
+   * can't be spoofed to bypass `require_https` or `allowed_ips`. If your
+   * proxy isn't on localhost, add its address here.
+   */
+  trusted_proxies: parseList(process.env.BASEPANEL_TRUSTED_PROXIES) ??
+    ['127.0.0.1', '::1', '::ffff:127.0.0.1'],
 
   /** Optional IP allowlist (exact match against the client's address). */
   allowed_ips: parseList(process.env.BASEPANEL_ALLOWED_IPS) ?? [],
@@ -67,8 +76,12 @@ const config = {
   /** SQLite busy timeout in milliseconds. */
   busy_timeout_ms: parseInt(process.env.BASEPANEL_BUSY_TIMEOUT_MS, 10) || 5000,
 
-  /** Server bind address. */
-  host: process.env.BASEPANEL_HOST || '0.0.0.0',
+  /**
+   * Server bind address. Defaults to loopback so the bridge is only
+   * reachable through your reverse proxy; set BASEPANEL_HOST=0.0.0.0 to
+   * expose it directly (e.g. inside a container).
+   */
+  host: process.env.BASEPANEL_HOST || '127.0.0.1',
   port: parseInt(process.env.BASEPANEL_PORT, 10) || 8080,
 };
 
@@ -135,11 +148,11 @@ async function handleRequest(req, res) {
     return;
   }
 
-  if (config.require_https && !isHttps(req, config.trust_proxy)) {
+  if (config.require_https && !isHttps(req)) {
     return sendError(res, 400, 'HTTPS_REQUIRED', 'This bridge must be served over HTTPS.');
   }
 
-  if (config.allowed_ips.length > 0 && !config.allowed_ips.includes(clientIp(req, config.trust_proxy))) {
+  if (config.allowed_ips.length > 0 && !config.allowed_ips.includes(clientIp(req))) {
     return sendError(res, 403, 'IP_FORBIDDEN', 'Client IP is not in the allowlist.');
   }
 
@@ -239,19 +252,29 @@ function applyCors(req, res, origins) {
   res.setHeader('Access-Control-Max-Age', '86400');
 }
 
-function isHttps(req, trustProxy) {
+function isFromTrustedProxy(req) {
+  const peer = (req.socket && req.socket.remoteAddress) || '';
+  return config.trust_proxy && config.trusted_proxies.includes(peer);
+}
+
+function isHttps(req) {
   if (req.socket && req.socket.encrypted) return true;
-  if (trustProxy) {
-    const proto = (req.headers['x-forwarded-proto'] || '').toString().split(',')[0].trim().toLowerCase();
+  if (isFromTrustedProxy(req)) {
+    // Take the last (right-most) entry: it's the one set by our own proxy.
+    const parts = (req.headers['x-forwarded-proto'] || '').toString().split(',');
+    const proto = parts[parts.length - 1].trim().toLowerCase();
     if (proto === 'https') return true;
   }
   return false;
 }
 
-function clientIp(req, trustProxy) {
-  if (trustProxy) {
-    const xf = (req.headers['x-forwarded-for'] || '').toString();
-    if (xf) return xf.split(',')[0].trim();
+function clientIp(req) {
+  if (isFromTrustedProxy(req)) {
+    // Right-most X-Forwarded-For entry is appended by our trusted proxy;
+    // anything left of it is client-supplied and spoofable.
+    const parts = (req.headers['x-forwarded-for'] || '').toString()
+      .split(',').map((s) => s.trim()).filter(Boolean);
+    if (parts.length > 0) return parts[parts.length - 1];
   }
   return req.socket && req.socket.remoteAddress ? req.socket.remoteAddress : '';
 }
@@ -262,9 +285,10 @@ function isTokenValid(req, expected) {
   if (!m) return false;
   if (!expected || expected === PLACEHOLDER_TOKEN) return false;
 
-  const a = Buffer.from(expected);
-  const b = Buffer.from(m[1]);
-  if (a.length !== b.length) return false;
+  // Hash both sides so the comparison is constant-time and constant-length
+  // (a raw length check would leak the token's length).
+  const a = crypto.createHash('sha256').update(expected).digest();
+  const b = crypto.createHash('sha256').update(m[1]).digest();
   return crypto.timingSafeEqual(a, b);
 }
 
@@ -487,7 +511,7 @@ function isSafeRead(sql) {
     .replace(/\/\*[\s\S]*?\*\//g, ' ')
     .replace(/--[^\n]*/g, ' ')
     .trimStart();
-  return /^(SELECT|WITH|EXPLAIN|PRAGMA|VALUES|ANALYZE)\b/i.test(stripped);
+  return /^(SELECT|WITH|EXPLAIN|PRAGMA|VALUES)\b/i.test(stripped);
 }
 
 // --- Responses ---------------------------------------------------------------

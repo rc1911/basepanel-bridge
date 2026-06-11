@@ -25,6 +25,7 @@ License: MIT
 from __future__ import annotations
 
 import base64
+import hashlib
 import hmac
 import json
 import os
@@ -65,11 +66,19 @@ CONFIG: Dict[str, Any] = {
     "read_only": _bool(os.environ.get("BASEPANEL_READ_ONLY"), False),
     "require_https": _bool(os.environ.get("BASEPANEL_REQUIRE_HTTPS"), True),
     "trust_proxy": _bool(os.environ.get("BASEPANEL_TRUST_PROXY"), True),
+    # Peer addresses allowed to set X-Forwarded-* headers (your reverse
+    # proxy). Forwarded headers from any other peer are ignored, so they
+    # can't be spoofed to bypass require_https or allowed_ips. If your
+    # proxy isn't on localhost, add its address here.
+    "trusted_proxies": _list(os.environ.get("BASEPANEL_TRUSTED_PROXIES"))
+    or ["127.0.0.1", "::1", "::ffff:127.0.0.1"],
     "allowed_ips": _list(os.environ.get("BASEPANEL_ALLOWED_IPS")) or [],
     "allowed_origins": _list(os.environ.get("BASEPANEL_ALLOWED_ORIGINS")) or ["*"],
     "max_body_bytes": int(os.environ.get("BASEPANEL_MAX_BODY_BYTES", 4 * 1024 * 1024)),
     "busy_timeout_ms": int(os.environ.get("BASEPANEL_BUSY_TIMEOUT_MS", 5000)),
-    "host": os.environ.get("BASEPANEL_HOST", "0.0.0.0"),
+    # Loopback by default so the bridge is only reachable through your
+    # reverse proxy; set BASEPANEL_HOST=0.0.0.0 to expose it directly.
+    "host": os.environ.get("BASEPANEL_HOST", "127.0.0.1"),
     "port": int(os.environ.get("BASEPANEL_PORT", 8080)),
 }
 
@@ -82,7 +91,7 @@ BRIDGE_VERSION = "1.0.0"
 PROTOCOL_VERSION = 1
 PLACEHOLDER_TOKEN = "REPLACE_ME_WITH_A_LONG_RANDOM_TOKEN"
 
-_SAFE_READ = re.compile(r"^(SELECT|WITH|EXPLAIN|PRAGMA|VALUES|ANALYZE)\b", re.IGNORECASE)
+_SAFE_READ = re.compile(r"^(SELECT|WITH|EXPLAIN|PRAGMA|VALUES)\b", re.IGNORECASE)
 _RETURNING = re.compile(r"\bRETURNING\b", re.IGNORECASE)
 _BEARER = re.compile(r"^Bearer\s+(\S+)$", re.IGNORECASE)
 _BLOCK_COMMENT = re.compile(r"/\*.*?\*/", re.DOTALL)
@@ -108,10 +117,10 @@ def handle(method: str, path: str, headers: Dict[str, str], body: bytes,
         return 204, cors_headers, b""
 
     try:
-        if CONFIG["require_https"] and not _is_https(scheme, headers, CONFIG["trust_proxy"]):
+        if CONFIG["require_https"] and not _is_https(scheme, headers, remote_ip):
             raise BridgeError(400, "HTTPS_REQUIRED", "This bridge must be served over HTTPS.")
 
-        if CONFIG["allowed_ips"] and _client_ip(remote_ip, headers, CONFIG["trust_proxy"]) not in CONFIG["allowed_ips"]:
+        if CONFIG["allowed_ips"] and _client_ip(remote_ip, headers) not in CONFIG["allowed_ips"]:
             raise BridgeError(403, "IP_FORBIDDEN", "Client IP is not in the allowlist.")
 
         if method in ("GET", "HEAD"):
@@ -182,21 +191,28 @@ def _cors_headers(origin: str, allowed: List[str]) -> Dict[str, str]:
     return headers
 
 
-def _is_https(scheme: str, headers: Dict[str, str], trust_proxy: bool) -> bool:
+def _is_from_trusted_proxy(remote: str) -> bool:
+    return CONFIG["trust_proxy"] and remote in CONFIG["trusted_proxies"]
+
+
+def _is_https(scheme: str, headers: Dict[str, str], remote: str) -> bool:
     if scheme == "https":
         return True
-    if trust_proxy:
-        proto = headers.get("x-forwarded-proto", "").split(",")[0].strip().lower()
+    if _is_from_trusted_proxy(remote):
+        # Take the last (right-most) entry: it's the one set by our own proxy.
+        proto = headers.get("x-forwarded-proto", "").split(",")[-1].strip().lower()
         if proto == "https":
             return True
     return False
 
 
-def _client_ip(remote: str, headers: Dict[str, str], trust_proxy: bool) -> str:
-    if trust_proxy:
-        xf = headers.get("x-forwarded-for", "")
-        if xf:
-            return xf.split(",")[0].strip()
+def _client_ip(remote: str, headers: Dict[str, str]) -> str:
+    if _is_from_trusted_proxy(remote):
+        # Right-most X-Forwarded-For entry is appended by our trusted proxy;
+        # anything left of it is client-supplied and spoofable.
+        parts = [p.strip() for p in headers.get("x-forwarded-for", "").split(",") if p.strip()]
+        if parts:
+            return parts[-1]
     return remote
 
 
@@ -206,7 +222,11 @@ def _token_valid(auth_header: str, expected: str) -> bool:
         return False
     if not expected or expected == PLACEHOLDER_TOKEN:
         return False
-    return hmac.compare_digest(expected.encode("utf-8"), m.group(1).encode("utf-8"))
+    # Hash both sides so the comparison is constant-time and constant-length
+    # (comparing raw values would leak the token's length).
+    a = hashlib.sha256(expected.encode("utf-8")).digest()
+    b = hashlib.sha256(m.group(1).encode("utf-8")).digest()
+    return hmac.compare_digest(a, b)
 
 
 def _normalize_statements(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
