@@ -1,0 +1,28 @@
+# Local databases / test artifacts
+*.sqlite
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
+tmp/
+.DS_Store
+
+# Editor / OS
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Node / npm noise (we don't ship a package, but contributors may add tooling)
+node_modules/
+package-lock.json
+yarn.lock
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# PHP
+vendor/
+composer.lock
