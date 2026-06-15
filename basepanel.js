@@ -517,31 +517,15 @@ function isSafeRead(sql) {
 // --- Responses ---------------------------------------------------------------
 
 function sendInfo(res) {
-  const exists = fs.existsSync(config.database_path);
-  let size = null;
-  let sqliteVersion = null;
-  if (exists) {
-    try { size = fs.statSync(config.database_path).size; } catch (_) { /* */ }
-    try {
-      const tmp = new DatabaseSync(config.database_path, { readOnly: true });
-      const row = tmp.prepare('SELECT sqlite_version() AS v').get();
-      if (row) sqliteVersion = row.v;
-      tmp.close();
-    } catch (_) { /* */ }
-  }
+  // This endpoint is unauthenticated, so it returns only non-sensitive
+  // liveness info. Database details (name, size, SQLite version) are
+  // intentionally omitted to avoid leaking metadata to anonymous callers.
   sendJson(res, 200, {
     ok: true,
     bridge: BRIDGE_NAME,
     version: BRIDGE_VERSION,
     protocol: PROTOCOL_VERSION,
     authConfigured: !!config.bearer_token && config.bearer_token !== PLACEHOLDER_TOKEN,
-    readOnly: !!config.read_only,
-    database: {
-      name: path.basename(config.database_path),
-      exists,
-      size,
-      sqliteVersion,
-    },
   });
 }
 

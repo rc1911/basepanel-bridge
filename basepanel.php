@@ -480,33 +480,15 @@ function is_safe_read(string $sql): bool
 
 function send_info(array $config): void
 {
-    $path     = $config['database_path'];
-    $exists   = file_exists($path);
-    $sqliteOk = extension_loaded('pdo_sqlite');
-
-    $sqliteVersion = null;
-    if ($sqliteOk && $exists) {
-        try {
-            $pdo           = new PDO('sqlite:' . $path);
-            $sqliteVersion = (string) $pdo->query('SELECT sqlite_version()')->fetchColumn();
-        } catch (Throwable $e) {
-            $sqliteVersion = null;
-        }
-    }
-
+    // This endpoint is unauthenticated, so it returns only non-sensitive
+    // liveness info. Database details (name, size, SQLite version) are
+    // intentionally omitted to avoid leaking metadata to anonymous callers.
     send_json([
         'ok'             => true,
         'bridge'         => BRIDGE_NAME,
         'version'        => BRIDGE_VERSION,
         'protocol'       => PROTOCOL_VERSION,
         'authConfigured' => $config['bearer_token'] !== '' && $config['bearer_token'] !== PLACEHOLDER_TOKEN,
-        'readOnly'       => (bool) $config['read_only'],
-        'database'       => [
-            'name'          => basename($path),
-            'exists'        => $exists,
-            'size'          => $exists ? filesize($path) : null,
-            'sqliteVersion' => $sqliteVersion,
-        ],
     ]);
 }
 

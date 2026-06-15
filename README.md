@@ -62,9 +62,7 @@ care which one you choose.
   "bridge": "basepanel-bridge-php",
   "version": "1.0.0",
   "protocol": 1,
-  "authConfigured": true,
-  "readOnly": false,
-  "database": { "name": "app.sqlite", "exists": true, "size": 24576, "sqliteVersion": "3.43.2" }
+  "authConfigured": true
 }
 ```
 
@@ -211,8 +209,11 @@ A single endpoint at the script's URL.
 ### `GET /` — health / info (no auth)
 
 Returns minimal information so the Basepanel app can validate the deployment
-before asking the user for a token. Never includes filesystem paths or any
-schema details.
+before asking the user for a token. Because this endpoint is unauthenticated,
+it deliberately exposes only liveness fields — never filesystem paths, the
+database name, its size, the SQLite version, or any schema details. Those
+would let anonymous callers fingerprint the bridge and track database growth
+over time, so they are returned only on the authenticated `POST` endpoint.
 
 ```json
 {
@@ -220,14 +221,7 @@ schema details.
   "bridge": "basepanel-bridge-php",
   "version": "1.0.0",
   "protocol": 1,
-  "authConfigured": true,
-  "readOnly": false,
-  "database": {
-    "name": "app.sqlite",
-    "exists": true,
-    "size": 24576,
-    "sqliteVersion": "3.43.2"
-  }
+  "authConfigured": true
 }
 ```
 

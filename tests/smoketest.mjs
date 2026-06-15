@@ -136,7 +136,7 @@ async function runTests() {
       assert.equal(r.body.protocol, 1);
       assert.equal(r.body.authConfigured, true);
       assert.ok(r.body.bridge.startsWith('basepanel-bridge-'));
-      assert.equal(r.body.database.exists, true);
+      assert.equal(r.body.database, undefined);
     }],
     ['POST without token is rejected', async () => {
       const r = await http('POST', { auth: false, body: { sql: 'SELECT 1' } });

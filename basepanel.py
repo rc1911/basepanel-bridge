@@ -366,22 +366,15 @@ def _encode_value(v: Any) -> Any:
 
 
 def _info_payload() -> Dict[str, Any]:
-    path = CONFIG["database_path"]
-    exists = os.path.isfile(path)
-    size = os.path.getsize(path) if exists else None
+    # This endpoint is unauthenticated, so it returns only non-sensitive
+    # liveness info. Database details (name, size, SQLite version) are
+    # intentionally omitted to avoid leaking metadata to anonymous callers.
     return {
         "ok": True,
         "bridge": BRIDGE_NAME,
         "version": BRIDGE_VERSION,
         "protocol": PROTOCOL_VERSION,
         "authConfigured": bool(CONFIG["bearer_token"]) and CONFIG["bearer_token"] != PLACEHOLDER_TOKEN,
-        "readOnly": bool(CONFIG["read_only"]),
-        "database": {
-            "name": os.path.basename(path),
-            "exists": exists,
-            "size": size,
-            "sqliteVersion": sqlite3.sqlite_version,
-        },
     }
 
 
